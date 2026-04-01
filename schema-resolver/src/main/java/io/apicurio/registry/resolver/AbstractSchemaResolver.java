@@ -8,6 +8,7 @@ import io.apicurio.registry.resolver.client.RegistryClientFacadeFactory;
 import io.apicurio.registry.resolver.client.RegistryVersionCoordinates;
 import io.apicurio.registry.resolver.config.SchemaResolverConfig;
 import io.apicurio.registry.resolver.data.Record;
+import io.apicurio.registry.resolver.strategy.ArtifactCoordinates;
 import io.apicurio.registry.resolver.strategy.ArtifactReference;
 import io.apicurio.registry.resolver.strategy.ArtifactReferenceResolverStrategy;
 import io.apicurio.registry.resolver.utils.Utils;
@@ -199,19 +200,42 @@ public abstract class AbstractSchemaResolver<S, T> implements SchemaResolver<S, 
             String artifactId = reference.getArtifactId();
             String version = reference.getVersion();
 
-            final String referenceContent = this.clientFacade.getSchemaByGAV(groupId, artifactId, version);
-            final List<RegistryArtifactReference> referenceReferences =
-                    this.clientFacade.getReferencesByGAV(groupId, artifactId, version);
+            ArtifactCoordinates coordinates = ArtifactCoordinates.builder()
+                    .groupId(groupId).artifactId(artifactId).version(version).build();
 
-            if (!referenceReferences.isEmpty()) {
-                final Map<String, ParsedSchema<S>> nestedReferences = resolveReferences(referenceReferences);
-                resolvedReferences.putAll(nestedReferences);
-                resolvedReferences.put(reference.getName(), parseSchemaFromStream(reference.getName(),
-                        referenceContent, resolveReferences(referenceReferences)));
-            } else {
-                resolvedReferences.put(reference.getName(),
-                        parseSchemaFromStream(reference.getName(), referenceContent, Collections.emptyMap()));
+            SchemaLookupResult<S> result = schemaCache.getByArtifactCoordinates(coordinates, key -> {
+                final String referenceContent = this.clientFacade.getSchemaByGAV(
+                        key.getGroupId(), key.getArtifactId(), key.getVersion());
+                final List<RegistryArtifactReference> referenceReferences =
+                        this.clientFacade.getReferencesByGAV(
+                                key.getGroupId(), key.getArtifactId(), key.getVersion());
+
+                Map<String, ParsedSchema<S>> nestedReferences;
+                if (!referenceReferences.isEmpty()) {
+                    nestedReferences = resolveReferences(referenceReferences);
+                } else {
+                    nestedReferences = Collections.emptyMap();
+                }
+
+                ParsedSchema<S> parsedSchema = parseSchemaFromStream(
+                        reference.getName(), referenceContent, nestedReferences);
+
+                return SchemaLookupResult.<S>builder()
+                        .groupId(key.getGroupId())
+                        .artifactId(key.getArtifactId())
+                        .version(key.getVersion())
+                        .parsedSchema(parsedSchema)
+                        .build();
+            });
+
+            // Flatten nested schema references into the result map
+            ParsedSchema<S> parsedSchema = result.getParsedSchema();
+            if (parsedSchema.hasReferences()) {
+                for (ParsedSchema<S> nestedRef : parsedSchema.getSchemaReferences()) {
+                    resolvedReferences.put(nestedRef.referenceName(), nestedRef);
+                }
             }
+            resolvedReferences.put(reference.getName(), parsedSchema);
         });
         return resolvedReferences;
     }
